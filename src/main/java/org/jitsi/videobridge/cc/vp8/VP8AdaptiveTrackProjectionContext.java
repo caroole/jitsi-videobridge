@@ -23,6 +23,8 @@ import org.jitsi.impl.neomedia.rtp.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.format.*;
 import org.jitsi.util.*;
+import org.jitsi.utils.*;
+import org.jitsi.utils.ArrayUtils;
 import org.jitsi.videobridge.cc.*;
 
 import java.util.*;
