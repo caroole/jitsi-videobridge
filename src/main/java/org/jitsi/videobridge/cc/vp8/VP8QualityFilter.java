@@ -16,9 +16,10 @@
 package org.jitsi.videobridge.cc.vp8;
 
 import org.jetbrains.annotations.*;
-import org.jitsi.impl.neomedia.codec.video.vp8.*;
-import org.jitsi.service.neomedia.*;
-import org.jitsi.utils.logging.*;
+import org.jitsi.nlj.rtp.*;
+import org.jitsi.utils.logging2.*;
+import org.jitsi_modified.impl.neomedia.codec.video.vp8.*;
+import org.json.simple.*;
 
 /**
  * This class is responsible for dropping VP8 simulcast/svc packets based on
@@ -33,8 +34,7 @@ class VP8QualityFilter
      * The {@link Logger} to be used by this instance to print debug
      * information.
      */
-    private static final Logger
-        logger = Logger.getLogger(VP8QualityFilter.class);
+    private final Logger logger;
 
     /**
      * The default maximum frequency (in millis) at which the media engine
@@ -67,7 +67,7 @@ class VP8QualityFilter
      * The spatial/quality layer id that this instance tries to achieve. Upon
      * receipt of a packet, we check whether externalSpatialLayerIdTarget
      * (that's specified as an argument to the
-     * {@link #acceptFrame(RawPacket, int, long)} method) is set to something
+     * {@link #acceptFrame(VideoRtpPacket, int, long)} method) is set to something
      * different, in which case we set {@link #needsKeyframe} equal to true and
      * update.
      */
@@ -79,6 +79,11 @@ class VP8QualityFilter
      * field is synchronized on this instance.
      */
     private int currentSpatialLayerId = SUSPENDED_LAYER_ID;
+
+    public VP8QualityFilter(Logger parentLogger)
+    {
+        this.logger = parentLogger.createChildLogger(VP8QualityFilter.class.getName());
+    }
 
     /**
      * @return true if a the target spatial/quality layer id has changed and a
@@ -106,7 +111,7 @@ class VP8QualityFilter
      * @return true to accept the VP8 frame, otherwise false.
      */
     synchronized boolean acceptFrame(
-        @NotNull RawPacket firstPacketOfFrame,
+        @NotNull VideoRtpPacket firstPacketOfFrame,
         int incomingIndex,
         int externalTargetIndex, long nowMs)
     {
@@ -157,13 +162,22 @@ class VP8QualityFilter
         int spatialLayerId = getSpatialLayerId(incomingIndex);
         if (DePacketizer.isKeyFrame(buf, payloadOff, payloadLen))
         {
+            logger.debug(() -> "Quality filter got keyframe for stream "
+                    + firstPacketOfFrame.getSsrc());
             return acceptKeyframe(spatialLayerId, nowMs);
         }
         else if (currentSpatialLayerId > SUSPENDED_LAYER_ID)
         {
-            if (!isInSwitchingPhase(nowMs)
-                && isPossibleToSwitch(firstPacketOfFrame, spatialLayerId))
+            if (isOutOfSwitchingPhase(nowMs) && isPossibleToSwitch(spatialLayerId))
             {
+                // XXX(george) i've noticed some "rogue" base layer keyframes
+                // that trigger this. what happens is the client sends a base
+                // layer key frame, the bridge switches to that layer because
+                // for all it knows it may be the only keyframe sent by the
+                // client engine. then the bridge notices that packets from the
+                // higher quality streams are flowing and execution ends-up
+                // here. it is a mystery why the engine is "leaking" base layer
+                // key frames
                 needsKeyframe = true;
             }
 
@@ -209,19 +223,17 @@ class VP8QualityFilter
      * @param nowMs the current time (in millis)
      * @return true if we're in layer switching phase, false otherwise.
      */
-    private synchronized boolean isInSwitchingPhase(long nowMs)
+    private synchronized boolean isOutOfSwitchingPhase(long nowMs)
     {
         long deltaMs = nowMs - mostRecentKeyframeGroupArrivalTimeMs;
-        return deltaMs <= MIN_KEY_FRAME_WAIT_MS;
+        return deltaMs > MIN_KEY_FRAME_WAIT_MS;
     }
 
     /**
-     * @param firstPacketOfFrame the first packet of a frame.
      * @return true if it looks like we can re-scale (see implementation of
      * method for specific details).
      */
-    private synchronized boolean isPossibleToSwitch(
-        @NotNull RawPacket firstPacketOfFrame, int spatialLayerId)
+    private synchronized boolean isPossibleToSwitch(int spatialLayerId)
     {
         if (spatialLayerId == -1)
         {
@@ -268,21 +280,19 @@ class VP8QualityFilter
         {
             // something went terribly wrong, normally we should be able to
             // extract the layer id from a keyframe.
+            logger.error("unable to get layer id from keyframe");
             return false;
         }
 
-        if (logger.isDebugEnabled())
-        {
-            logger.debug(
-                "Received a keyframe of spatial layer: " + spatialLayerIdOfKeyframe);
+        logger.debug(() -> "Received a keyframe of spatial layer: "
+                    + spatialLayerIdOfKeyframe);
 
-        }
 
         // The keyframe request has been fulfilled at this point, regardless of
         // whether we'll be able to achieve the internalSpatialLayerIdTarget.
         needsKeyframe = false;
 
-        if (!isInSwitchingPhase(nowMs))
+        if (isOutOfSwitchingPhase(nowMs))
         {
             // During the switching phase we always project the first
             // keyframe because it may very well be the only one that we
@@ -291,12 +301,9 @@ class VP8QualityFilter
 
             mostRecentKeyframeGroupArrivalTimeMs = nowMs;
 
-            if (logger.isDebugEnabled())
-            {
-                logger.debug("First keyframe in this kf group " +
-                    "currentSpatialLayerId: " + spatialLayerIdOfKeyframe +
-                    ". Target is " + internalSpatialLayerIdTarget);
-            }
+            logger.debug(() -> "First keyframe in this kf group " +
+                "currentSpatialLayerId: " + spatialLayerIdOfKeyframe +
+                ". Target is " + internalSpatialLayerIdTarget);
 
             if (spatialLayerIdOfKeyframe <= internalSpatialLayerIdTarget)
             {
@@ -323,12 +330,9 @@ class VP8QualityFilter
             {
                 // upscale or current quality case
                 currentSpatialLayerId = spatialLayerIdOfKeyframe;
-                if (logger.isDebugEnabled())
-                {
-                    logger.debug("Upscaling to spatial layer "
-                        + spatialLayerIdOfKeyframe
-                        + ". The target is " + internalSpatialLayerIdTarget);
-                }
+                logger.debug(() -> "Upscaling to spatial layer "
+                    + spatialLayerIdOfKeyframe
+                    + ". The target is " + internalSpatialLayerIdTarget);
                 return true;
             }
             else if (spatialLayerIdOfKeyframe <= internalSpatialLayerIdTarget
@@ -336,12 +340,9 @@ class VP8QualityFilter
             {
                 // downscale case
                 currentSpatialLayerId = spatialLayerIdOfKeyframe;
-                if (logger.isDebugEnabled())
-                {
-                    logger.debug("Downscaling to spatial layer "
-                        + spatialLayerIdOfKeyframe + ". The target is + "
-                        + internalSpatialLayerIdTarget);
-                }
+                logger.debug(() -> " Downscaling to spatial layer "
+                    + spatialLayerIdOfKeyframe + ". The target is + "
+                    + internalSpatialLayerIdTarget);
                 return true;
             }
             else
@@ -375,5 +376,25 @@ class VP8QualityFilter
     private static int getSpatialLayerId(int index)
     {
         return index > -1 ? index / 3 : -1;
+    }
+
+    /**
+     * Gets a JSON representation of the parts of this object's state that
+     * are deemed useful for debugging.
+     */
+    public JSONObject getDebugState()
+    {
+        JSONObject debugState = new JSONObject();
+        debugState.put(
+                "mostRecentKeyframeGroupArrivalTimeMs",
+                mostRecentKeyframeGroupArrivalTimeMs);
+        debugState.put("needsKeyframe", needsKeyframe);
+        debugState.put(
+                "internalSpatialLayerIdTarget",
+                internalSpatialLayerIdTarget);
+        debugState.put("currentSpatialLayerId", currentSpatialLayerId);
+
+
+        return debugState;
     }
 }

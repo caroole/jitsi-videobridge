@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2015 Atlassian Pty Ltd
+ * Copyright @ 2015 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,14 +23,13 @@ import org.eclipse.jetty.servlets.*;
 import org.eclipse.jetty.util.resource.*;
 import org.jitsi.rest.*;
 import org.jitsi.util.*;
-import org.jitsi.utils.logging.*;
+import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.rest.ssi.*;
 import org.osgi.framework.*;
 
 import javax.servlet.*;
 import javax.servlet.http.*;
 import java.io.*;
-import java.net.*;
 import java.util.*;
 
 /**
@@ -47,8 +46,7 @@ public class PublicRESTBundleActivator
      * The logger instance used by this
      * {@link PublicClearPortRedirectBundleActivator}.
      */
-    private static final Logger logger
-        = Logger.getLogger(PublicRESTBundleActivator.class);
+    private static final Logger logger = new LoggerImpl(PublicRESTBundleActivator.class.getName());
 
     /**
      * The prefix of the property names for the Jetty instance managed by
@@ -213,8 +211,7 @@ public class PublicRESTBundleActivator
         // The rules for mappings of the Servlet specification do not allow path
         // matching in the middle of the path.
         servletContextHandler.addServlet(
-                holder,
-                HandlerImpl.COLIBRI_TARGET + "*");
+                holder, "/colibri/*");
 
         return holder;
     }
@@ -369,7 +366,6 @@ public class PublicRESTBundleActivator
                  *
                  * @param path the path to check
                  * @return the resource to server.
-                 * @throws MalformedURLException
                  */
                 @Override
                 public Resource getResource(String path)
@@ -389,7 +385,7 @@ public class PublicRESTBundleActivator
                     }
                     catch(IOException e)
                     {
-                        logger.info("Error constructing resource.", e);
+                        logger.error("Error constructing resource.", e);
                         return null;
                     }
                 }
@@ -609,6 +605,9 @@ public class PublicRESTBundleActivator
          */
         private final int targetPort;
 
+        /**
+         * Initializes a new {@link RedirectHandler}.
+         */
         RedirectHandler(String targetProtocol, int targetPort)
         {
             this.targetProtocol = targetProtocol;
