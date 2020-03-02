@@ -15,13 +15,13 @@
  */
 package org.jitsi.videobridge;
 
+import org.jetbrains.annotations.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.octo.*;
 import org.jitsi.videobridge.util.*;
 import org.json.simple.*;
 import org.json.simple.parser.*;
 
-import java.io.*;
 import java.util.*;
 
 import static org.jitsi.videobridge.EndpointMessageBuilder.*;
@@ -35,6 +35,12 @@ import static org.jitsi.videobridge.EndpointMessageBuilder.*;
 public abstract class AbstractEndpointMessageTransport
 {
     /**
+     * The name of the JSON property that indicates the target Octo endpoint id
+     * of a propagated JSON message.
+     */
+    public static final String PROP_TARGET_OCTO_ENDPOINT_ID = "targetOctoEndpointId";
+
+    /**
      * The {@link Endpoint} associated with this
      * {@link EndpointMessageTransport}.
      */
@@ -44,17 +50,23 @@ public abstract class AbstractEndpointMessageTransport
      * The {@link Logger} to be used by this instance to print debug
      * information.
      */
-    protected final Logger logger;
+    protected final @NotNull Logger logger;
 
     /**
      * Initializes a new {@link AbstractEndpointMessageTransport} instance.
-     * @param endpoint
+     * @param endpoint the endpoint to which this transport belongs
      */
-    public AbstractEndpointMessageTransport(AbstractEndpoint endpoint, Logger parentLogger)
+    public AbstractEndpointMessageTransport(AbstractEndpoint endpoint, @NotNull Logger parentLogger)
     {
         this.endpoint = endpoint;
         this.logger = parentLogger.createChildLogger(getClass().getName());
     }
+
+    /**
+     *
+     * @return true if this message transport is 'connected', false otherwise
+     */
+    public abstract boolean isConnected();
 
     /**
      * Fires the message transport ready event for the associated endpoint.
@@ -159,7 +171,7 @@ public abstract class AbstractEndpointMessageTransport
      */
     @SuppressWarnings("unchecked")
     protected void onClientEndpointMessage(
-        Object src,
+        @SuppressWarnings("unused") Object src,
         JSONObject jsonObject)
     {
         String to = (String)jsonObject.get("to");
@@ -255,9 +267,21 @@ public abstract class AbstractEndpointMessageTransport
      * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
      * {@code PinnedEndpointChangedEvent} which has been received.
      */
-    abstract protected void onPinnedEndpointChangedEvent(
-        Object src,
-        JSONObject jsonObject);
+    protected void onPinnedEndpointChangedEvent(
+        @SuppressWarnings("unused") Object src,
+        JSONObject jsonObject)
+    {
+        // Find the new pinned endpoint.
+        String newPinnedEndpointID = (String) jsonObject.get("pinnedEndpoint");
+
+        Set<String> newPinnedIDs = Collections.emptySet();
+        if (newPinnedEndpointID != null && !"".equals(newPinnedEndpointID))
+        {
+            newPinnedIDs = Collections.singleton(newPinnedEndpointID);
+        }
+
+        onPinnedEndpointsChangedEvent(jsonObject, newPinnedIDs);
+    }
 
     /**
      * Notifies this {@code Endpoint} that a {@code PinnedEndpointsChangedEvent}
@@ -268,9 +292,28 @@ public abstract class AbstractEndpointMessageTransport
      * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
      * {@code PinnedEndpointChangedEvent} which has been received.
      */
-    abstract protected void onPinnedEndpointsChangedEvent(
-        Object src,
-        JSONObject jsonObject);
+    protected void onPinnedEndpointsChangedEvent(
+        @SuppressWarnings("unused") Object src,
+        JSONObject jsonObject)
+    {
+        // Find the new pinned endpoint.
+        Object o = jsonObject.get("pinnedEndpoints");
+        if (!(o instanceof JSONArray))
+        {
+            logger.warn("Received invalid or unexpected JSON: " + jsonObject);
+            return;
+        }
+
+        JSONArray jsonArray = (JSONArray) o;
+        Set<String> newPinnedEndpoints = filterStringsToSet(jsonArray);
+
+        if (logger.isDebugEnabled())
+        {
+            logger.debug("Pinned " + newPinnedEndpoints);
+        }
+
+        onPinnedEndpointsChangedEvent(jsonObject, newPinnedEndpoints);
+    }
 
     /**
      * Notifies this {@code Endpoint} that a {@code SelectedEndpointChangedEvent}
@@ -281,9 +324,22 @@ public abstract class AbstractEndpointMessageTransport
      * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
      * {@code SelectedEndpointChangedEvent} which has been received.
      */
-    abstract protected void onSelectedEndpointChangedEvent(
-        Object src,
-        JSONObject jsonObject);
+    protected void onSelectedEndpointChangedEvent(
+        @SuppressWarnings("unused") Object src,
+        JSONObject jsonObject)
+    {
+        // Find the new pinned endpoint.
+        String newSelectedEndpointID
+            = (String) jsonObject.get("selectedEndpoint");
+
+        Set<String> newSelectedIDs = Collections.emptySet();
+        if (newSelectedEndpointID != null && !"".equals(newSelectedEndpointID))
+        {
+            newSelectedIDs = Collections.singleton(newSelectedEndpointID);
+        }
+
+        onSelectedEndpointsChangedEvent(jsonObject, newSelectedIDs);
+    }
 
     /**
      * Notifies this {@code Endpoint} that a
@@ -294,9 +350,61 @@ public abstract class AbstractEndpointMessageTransport
      * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
      * {@code SelectedEndpointChangedEvent} which has been received.
      */
-    abstract protected void onSelectedEndpointsChangedEvent(
-        Object src,
-        JSONObject jsonObject);
+    protected void onSelectedEndpointsChangedEvent(
+        @SuppressWarnings("unused") Object src,
+        JSONObject jsonObject)
+    {
+        // Find the new pinned endpoint.
+        Object o = jsonObject.get("selectedEndpoints");
+        if (!(o instanceof JSONArray))
+        {
+            logger.warn("Received invalid or unexpected JSON: " + jsonObject);
+            return;
+        }
+
+        JSONArray jsonArray = (JSONArray) o;
+        Set<String> newSelectedEndpoints = filterStringsToSet(jsonArray);
+        onSelectedEndpointsChangedEvent(jsonObject, newSelectedEndpoints);
+    }
+
+    private Set<String> filterStringsToSet(JSONArray jsonArray)
+    {
+        Set<String> strings = new HashSet<>();
+        for (Object element : jsonArray)
+        {
+            if (element instanceof String)
+            {
+                strings.add((String)element);
+            }
+        }
+        return strings;
+    }
+
+    /**
+     * Notifies local or remote endpoints that a pinned event has been received.
+     * If it is a local endpoint that has received the message, then this method
+     * propagates the message to all proxies of the local endpoint.
+     *
+     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
+     * {@code PinnedEndpointChangedEvent} which has been received.
+     * @param newPinnedEndpoints the new pinned endpoints
+     */
+    protected abstract void onPinnedEndpointsChangedEvent(
+        JSONObject jsonObject,
+        Set<String> newPinnedEndpoints);
+
+    /**
+     * Notifies local or remote endpoints that a selected event has been received.
+     * If it is a local endpoint that has received the message, then this method
+     * propagates the message to all proxies of the local endpoint.
+     *
+     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
+     * {@code SelectedEndpointChangedEvent} which has been received.
+     * @param newSelectedEndpoints the new selected endpoints
+     */
+    protected abstract void onSelectedEndpointsChangedEvent(
+        JSONObject jsonObject,
+        Set<String> newSelectedEndpoints);
 
     /**
      * Notifies this {@code Endpoint} that a {@code LastNChangedEvent}
@@ -410,10 +518,8 @@ public abstract class AbstractEndpointMessageTransport
      * {@link EndpointMessageTransport}.
      *
      * @param msg message text to send.
-     * @throws IOException
      */
     protected void sendMessage(String msg)
-        throws IOException
     {
     }
 
@@ -422,5 +528,17 @@ public abstract class AbstractEndpointMessageTransport
      */
     protected void close()
     {
+    }
+
+    public JSONObject getDebugState() {
+        return new JSONObject();
+    }
+
+    /**
+     * Events generated by {@link AbstractEndpointMessageTransport} types which
+     * are of interest to other entities.
+     */
+    interface EndpointMessageTransportEventHandler {
+        void endpointMessageTransportConnected(@NotNull AbstractEndpoint endpoint);
     }
 }

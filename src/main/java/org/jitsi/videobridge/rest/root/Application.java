@@ -24,8 +24,6 @@ import org.osgi.framework.*;
 
 public class Application extends ResourceConfig
 {
-    protected Logger logger = new LoggerImpl(getClass().getName());
-
     public Application(BundleContext bundleContext)
     {
         // Register the resource binder for injecting OSGI services
@@ -34,5 +32,7 @@ public class Application extends ResourceConfig
         register(ConfigFilter.class);
         // Register all resources in the package
         packages("org.jitsi.videobridge.rest.root");
+        // Load any resources from Jicoco
+        packages("org.jitsi.rest");
     }
 }

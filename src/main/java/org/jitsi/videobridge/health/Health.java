@@ -16,15 +16,16 @@
 package org.jitsi.videobridge.health;
 
 import org.ice4j.ice.harvest.*;
-import org.jitsi.service.configuration.*;
 import org.jitsi.utils.concurrent.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.*;
-import org.jitsi.videobridge.transport.*;
+import org.jitsi.videobridge.ice.*;
 import org.jitsi.videobridge.xmpp.*;
 
 import java.io.*;
 import java.util.*;
+
+import static org.jitsi.videobridge.health.config.HealthConfig.*;
 
 /**
  * Checks the health of {@link Videobridge}.
@@ -53,43 +54,6 @@ public class Health
         = new RecurringRunnableExecutor(Health.class.getName());
 
     /**
-     * The default interval between health checks.
-     */
-    private static final int PERIOD_DEFAULT = 10000;
-
-    /**
-     * The name of the property which configures the interval between health
-     * checks.
-     */
-    public static final String PERIOD_PNAME
-        = "org.jitsi.videobridge.health.INTERVAL";
-
-    /**
-     * The default timeout for health checks.
-     */
-    private static final int TIMEOUT_DEFAULT = 30000;
-
-    /**
-     * The name of the property which configures the timeout for health checks.
-     * The {@link #check()} API will return failure unless a there was a health
-     * check performed in the last that many milliseconds.
-     */
-    public static final String TIMEOUT_PNAME
-        = "org.jitsi.videobridge.health.TIMEOUT";
-
-    /**
-     * The name of the property which makes any failures sticky (i.e. once the
-     * bridge becomes unhealthy it will never go back to a healthy state).
-     */
-    public static final String STICKY_FAILURES_PNAME
-        = "org.jitsi.videobridge.health.STICKY_FAILURES";
-
-    /**
-     * The default value for the {@code STICKY_FAILURES} property.
-     */
-    private static final boolean STICKY_FAILURES_DEFAULT = false;
-
-    /**
      * Failures in the first 5 minutes are never sticky.
      */
     private static final long STICKY_FAILURES_GRACE_PERIOD = 300_000;
@@ -108,7 +72,7 @@ public class Health
     private static void check(Conference conference)
     {
         final int numEndpoints = 2;
-        ArrayList<Endpoint> endpoints = new ArrayList<>(numEndpoints);
+        //ArrayList<Endpoint> endpoints = new ArrayList<>(numEndpoints);
 
         for (int i = 0; i < numEndpoints; ++i)
         {
@@ -124,7 +88,7 @@ public class Health
                 throw new RuntimeException(ioe);
             }
 
-            endpoints.add(endpoint);
+            //endpoints.add(endpoint);
 
             endpoint.createSctpConnection();
         }
@@ -174,7 +138,7 @@ public class Health
             throw new Exception("Address discovery through STUN failed");
         }
 
-        if (!Harvesters.healthy)
+        if (!Harvesters.isHealthy())
         {
             throw new Exception("Failed to bind single-port");
         }
@@ -241,7 +205,7 @@ public class Health
      */
     private static String generateEndpointID()
     {
-        return Long.toHexString(System.currentTimeMillis() + RANDOM.nextLong());
+        return String.format("%08x", RANDOM.nextInt());
     }
 
     /**
@@ -258,19 +222,6 @@ public class Health
     private long lastResultMs = -1;
 
     /**
-     * The timeout in milliseconds after which this videobridge will be
-     * considered unhealthy; i.e. if no health check has been completed in the
-     * last {@code timeout} milliseconds the bridge is unhealthy.
-     */
-    private final int timeout;
-
-    /**
-     * Whether failures are sticky, i.e. once the bridge becomes unhealthy it
-     * will never go back to a healthy state.
-     */
-    private final boolean stickyFailures;
-
-    /**
      * The time when this instance was started.
      */
     private final long startMs;
@@ -284,28 +235,9 @@ public class Health
      * Iniatializes a new {@link Health} instance for a specific
      * {@link Videobridge}.
      */
-    public Health(Videobridge videobridge, ConfigurationService cfg)
+    public Health(Videobridge videobridge)
     {
-        super(videobridge, PERIOD_DEFAULT, true);
-
-        if (cfg == null)
-        {
-            logger.warn("Configuration service is null, using only defaults.");
-        }
-
-        int period =
-            cfg == null ? PERIOD_DEFAULT
-                : cfg.getInt(PERIOD_PNAME, PERIOD_DEFAULT);
-        setPeriod(period);
-
-        timeout =
-            cfg == null ? TIMEOUT_DEFAULT
-                : cfg.getInt(TIMEOUT_PNAME, TIMEOUT_DEFAULT);
-
-        stickyFailures
-            = cfg == null ? STICKY_FAILURES_DEFAULT
-                : cfg.getBoolean(
-                    STICKY_FAILURES_PNAME, STICKY_FAILURES_DEFAULT);
+        super(videobridge, Config.getInterval(), true);
 
         startMs = System.currentTimeMillis();
 
@@ -346,7 +278,7 @@ public class Health
         long duration = System.currentTimeMillis() - start;
         lastResultMs = start + duration;
 
-        if (stickyFailures && hasFailed && exception == null)
+        if (Config.stickyFailures() && hasFailed && exception == null)
         {
             // We didn't fail this last test, but we've failed before and
             // sticky failures are enabled.
@@ -361,7 +293,7 @@ public class Health
         {
             logger.info(
                 "Performed a successful health check in " + duration
-                    + "ms. Sticky failure: " + (stickyFailures && hasFailed));
+                    + "ms. Sticky failure: " + (Config.stickyFailures() && hasFailed));
         }
         else
         {
@@ -386,7 +318,7 @@ public class Health
         long lastResultMs = this.lastResultMs;
         long timeSinceLastResult = System.currentTimeMillis() - lastResultMs;
 
-        if (timeSinceLastResult > timeout)
+        if (timeSinceLastResult > Config.getTimeout())
         {
             throw new Exception(
                 "No health checks performed recently, the last result was "

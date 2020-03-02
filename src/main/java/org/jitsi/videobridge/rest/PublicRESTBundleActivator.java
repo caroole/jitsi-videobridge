@@ -22,7 +22,7 @@ import org.eclipse.jetty.servlet.*;
 import org.eclipse.jetty.servlets.*;
 import org.eclipse.jetty.util.resource.*;
 import org.jitsi.rest.*;
-import org.jitsi.util.*;
+import org.jitsi.utils.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.rest.ssi.*;
 import org.osgi.framework.*;
@@ -436,8 +436,8 @@ public class PublicRESTBundleActivator
         if (privatePort > 0)
         {
             return new RedirectHandler(
-                privateSslContextFactoryKeyStorePath == null ? "http" : "https",
-                privatePort);
+                    privateSslContextFactoryKeyStorePath == null ? "http" : "https",
+                    privatePort);
         }
 
         return null;
@@ -526,7 +526,7 @@ public class PublicRESTBundleActivator
 
         // Colibri WebSockets
         ColibriWebSocketService colibriWebSocketService
-            = new ColibriWebSocketService(bundleContext, isTls());
+            = new ColibriWebSocketService(isTls());
         servletHolder
             = colibriWebSocketService.initializeColibriWebSocketServlet(
                     bundleContext,
@@ -593,7 +593,7 @@ public class PublicRESTBundleActivator
      * through the public HTTP interface to their new location (via the
      * private interface).
      */
-    private class RedirectHandler extends AbstractHandler
+    private static class RedirectHandler extends AbstractHandler
     {
         /**
          * The protocol ("http" or "https") of the target location.

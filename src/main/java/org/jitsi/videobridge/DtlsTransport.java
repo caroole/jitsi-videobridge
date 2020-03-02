@@ -16,6 +16,7 @@
 package org.jitsi.videobridge;
 
 import kotlin.*;
+import kotlin.jvm.functions.*;
 import org.ice4j.*;
 import org.ice4j.ice.*;
 import org.ice4j.socket.*;
@@ -30,10 +31,12 @@ import org.jitsi.nlj.transform.node.outgoing.*;
 import org.jitsi.nlj.util.*;
 import org.jitsi.rtp.*;
 import org.jitsi.rtp.extensions.*;
+import org.jitsi.rtp.rtcp.*;
 import org.jitsi.rtp.rtp.*;
 import org.jitsi.utils.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.utils.queue.*;
+import org.jitsi.videobridge.ice.*;
 import org.jitsi.videobridge.stats.*;
 import org.jitsi.videobridge.util.*;
 import org.jitsi.xmpp.extensions.jingle.*;
@@ -41,9 +44,9 @@ import org.json.simple.*;
 
 import java.io.*;
 import java.net.*;
+import java.time.*;
 import java.util.*;
 import java.util.function.*;
-import java.util.stream.*;
 
 /**
  * @author Brian Baldino
@@ -65,7 +68,18 @@ public class DtlsTransport extends IceTransport
     private static final Predicate<Packet> NON_DTLS_PREDICATE
             = DTLS_PREDICATE.negate();
 
-    public static final PacketDelayStats packetDelayStats = new PacketDelayStats();
+    private static final PacketDelayStats rtpPacketDelayStats = new PacketDelayStats();
+    private static final PacketDelayStats rtcpPacketDelayStats = new PacketDelayStats();
+
+    public static OrderedJsonObject getPacketDelayStats()
+    {
+        OrderedJsonObject packetDelayStats = new OrderedJsonObject();
+        packetDelayStats.put("rtp", DtlsTransport.rtpPacketDelayStats.toJson());
+        packetDelayStats.put("rtcp", DtlsTransport.rtcpPacketDelayStats.toJson());
+
+        return packetDelayStats;
+    }
+
     /**
      * An average of all of the individual bridge jitter values calculated by the
      * {@link DtlsTransport#bridgeJitterStats} instance variables below
@@ -126,8 +140,7 @@ public class DtlsTransport extends IceTransport
 
         dtlsStack.onHandshakeComplete((chosenSrtpProfile, tlsRole, keyingMaterial) -> {
             dtlsHandshakeComplete = true;
-            logger.info(logPrefix +
-                    "DTLS handshake complete. Got SRTP profile " +
+            logger.info("DTLS handshake complete. Got SRTP profile " +
                     chosenSrtpProfile);
             endpoint.setSrtpInformation(chosenSrtpProfile, tlsRole, keyingMaterial);
             dtlsConnectedSubscribers.forEach(Runnable::run);
@@ -163,8 +176,7 @@ public class DtlsTransport extends IceTransport
             }
             else
             {
-                logger.info(logPrefix +
-                        "Ignoring empty DtlsFingerprint extension: "
+                logger.info("Ignoring empty DtlsFingerprint extension: "
                                 + transportPacketExtension.toXML());
             }
         });
@@ -173,20 +185,17 @@ public class DtlsTransport extends IceTransport
             String setup = fingerprintExtensions.get(0).getSetup();
             if ("active".equalsIgnoreCase(setup))
             {
-                logger.info(logPrefix +
-                    "The remote side is acting as DTLS client, we'll act as server");
+                logger.info("The remote side is acting as DTLS client, we'll act as server");
                 dtlsStack.actAsServer();
             }
             else if ("passive".equalsIgnoreCase(setup))
             {
-                logger.info(logPrefix +
-                    "The remote side is acting as DTLS server, we'll act as client");
+                logger.info("The remote side is acting as DTLS server, we'll act as client");
                 dtlsStack.actAsClient();
             }
             else if (!StringUtils.isNullOrEmpty(setup))
             {
-                logger.error(logPrefix +
-                    "The remote side sent an unrecognized DTLS setup value: " +
+                logger.error("The remote side sent an unrecognized DTLS setup value: " +
                         setup);
             }
         }
@@ -208,8 +217,7 @@ public class DtlsTransport extends IceTransport
                 // hack(george) Jigasi sends a sha-1 dtls fingerprint without a
                 // setup attribute and it assumes a server role for the bridge.
 
-                logger.info(logPrefix +
-                    "Assume that the remote side is Jigasi, we'll act as server");
+                logger.info("Assume that the remote side is Jigasi, we'll act as server");
                 dtlsStack.actAsServer();
             }
         }
@@ -305,12 +313,21 @@ public class DtlsTransport extends IceTransport
         dtlsPath.setPredicate(DTLS_PREDICATE);
         PipelineBuilder dtlsPipelineBuilder = new PipelineBuilder();
         dtlsPipelineBuilder.node(dtlsReceiver);
-        dtlsPipelineBuilder.simpleNode(
-                "sctp app packet handler",
-                packetInfo -> {
-                    endpoint.dtlsAppPacketReceived(packetInfo);
-                    return null;
-        });
+        ConsumerNode sctpHandler = new ConsumerNode("sctp app packet handler")
+        {
+            @Override
+            protected void consume(@NotNull PacketInfo packetInfo)
+            {
+                endpoint.dtlsAppPacketReceived(packetInfo);
+            }
+
+            @Override
+            public void trace(@NotNull Function0<Unit> f)
+            {
+                f.invoke();
+            }
+        };
+        dtlsPipelineBuilder.node(sctpHandler);
         dtlsPath.setPath(dtlsPipelineBuilder.build());
         dtlsSrtpDemuxer.addPacketPath(dtlsPath);
 
@@ -323,12 +340,21 @@ public class DtlsTransport extends IceTransport
         // path here might be expensive.
         srtpPath.setPredicate(NON_DTLS_PREDICATE);
         PipelineBuilder srtpPipelineBuilder = new PipelineBuilder();
-        srtpPipelineBuilder.simpleNode(
-                "SRTP path",
-                packetInfo -> {
-                    endpoint.srtpPacketReceived(packetInfo);
-                    return null;
-        });
+        ConsumerNode srtpHandler = new ConsumerNode("SRTP path")
+        {
+            @Override
+            protected void consume(@NotNull PacketInfo packetInfo)
+            {
+                endpoint.srtpPacketReceived(packetInfo);
+            }
+
+            @Override
+            public void trace(@NotNull Function0<Unit> f)
+            {
+                f.invoke();
+            }
+        };
+        srtpPipelineBuilder.node(srtpHandler);
         srtpPath.setPath(srtpPipelineBuilder.build());
         dtlsSrtpDemuxer.addPacketPath(srtpPath);
 
@@ -422,12 +448,12 @@ public class DtlsTransport extends IceTransport
                 }
                 catch (SocketClosedException e)
                 {
-                    logger.info(logPrefix + "Socket closed, stopping reader.");
+                    logger.info("Socket closed, stopping reader.");
                     break;
                 }
                 catch (IOException e)
                 {
-                    logger.warn(logPrefix + "Stopping reader: ", e);
+                    logger.warn("Stopping reader: ", e);
                     break;
                 }
             }
@@ -447,21 +473,19 @@ public class DtlsTransport extends IceTransport
         installIncomingPacketReader(socket);
 
         packetSender.socket = socket;
-        logger.info(logPrefix + "Starting DTLS.");
+        logger.info("Starting DTLS.");
         TaskPools.IO_POOL.submit(() -> {
             try
             {
                 if (dtlsStack.getRole() == null)
                 {
-                    logger.warn(logPrefix +
-                            "Starting the DTLS stack before it knows its role");
+                    logger.warn("Starting the DTLS stack before it knows its role");
                 }
                 dtlsStack.start();
             }
             catch (Throwable e)
             {
-                logger.error(logPrefix +
-                        "Error during DTLS negotiation: " + e.toString() +
+                logger.error("Error during DTLS negotiation: " + e.toString() +
                         ", closing this transport manager");
                 close();
             }
@@ -477,6 +501,19 @@ public class DtlsTransport extends IceTransport
         endpoint.getConference().getVideobridge().getStatistics()
                 .totalIceFailed.incrementAndGet();
         endpoint.getConference().getStatistics().hasIceFailedEndpoint = true;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected void onIceConsentUpdated(long time)
+    {
+       super.onIceConsentUpdated(time);
+       endpoint
+           .getTransceiver()
+           .getPacketIOActivity()
+           .setLastIceActivityInstant(Instant.ofEpochMilli(time));
     }
 
     /**
@@ -512,13 +549,12 @@ public class DtlsTransport extends IceTransport
      * {@inheritDoc}
      */
     @Override
+    @SuppressWarnings("unchecked")
     public JSONObject getDebugState()
     {
         JSONObject debugState = super.getDebugState();
         debugState.put("bridge_jitter", bridgeJitterStats.getJitter());
         debugState.put("dtlsStack", dtlsStack.getNodeStats().toJson());
-        //debugState.put("dtlsReceiver"
-        //debugState.put("dtlsSender"
 
         debugState.put(
                 "outgoingPacketQueue",
@@ -573,7 +609,17 @@ public class DtlsTransport extends IceTransport
         @Override
         protected void consume(@NotNull PacketInfo packetInfo)
         {
-            packetDelayStats.addPacket(packetInfo);
+            Packet packet = packetInfo.getPacket();
+
+            if (PacketExtensionsKt.looksLikeRtp(packet))
+            {
+                rtpPacketDelayStats.addPacket(packetInfo);
+            }
+            else if (PacketExtensionsKt.looksLikeRtcp(packet))
+            {
+                rtcpPacketDelayStats.addPacket(packetInfo);
+            }
+
             bridgeJitterStats.packetSent(packetInfo);
             overallAverageBridgeJitter.addValue(bridgeJitterStats.getJitter());
             if (socket != null)
@@ -582,18 +628,23 @@ public class DtlsTransport extends IceTransport
                 {
                     socket.send(
                         new DatagramPacket(
-                                packetInfo.getPacket().getBuffer(),
-                                packetInfo.getPacket().getOffset(),
-                                packetInfo.getPacket().getLength()));
-                    ByteBufferPool.returnBuffer(packetInfo.getPacket().getBuffer());
+                                packet.getBuffer(),
+                                packet.getOffset(),
+                                packet.getLength()));
+                    ByteBufferPool.returnBuffer(packet.getBuffer());
                 }
                 catch (IOException e)
                 {
-                    logger.error(logPrefix +
-                            "Error sending packet: " + e.toString());
+                    logger.error("Error sending packet: " + e.toString());
                     throw new RuntimeException(e);
                 }
             }
+        }
+
+        @Override
+        public void trace(@NotNull Function0<Unit> f)
+        {
+            f.invoke();
         }
     }
 }

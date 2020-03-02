@@ -15,6 +15,8 @@
  */
 package org.jitsi.videobridge.octo;
 
+import kotlin.*;
+import kotlin.jvm.functions.*;
 import org.jetbrains.annotations.*;
 import org.jitsi.nlj.*;
 import org.jitsi.nlj.format.*;
@@ -114,6 +116,12 @@ public class OctoTentacle extends PropertyChangeNotifier implements PotentialPac
                 {
                     relay.sendPacket(packetInfo.getPacket(), targets,
                         conference.getGid(), packetInfo.getEndpointId());
+                }
+
+                @Override
+                public void trace(@NotNull Function0<Unit> f)
+                {
+                    f.invoke();
                 }
             });
         }
@@ -223,10 +231,12 @@ public class OctoTentacle extends PropertyChangeNotifier implements PotentialPac
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
 
-        if (octoEndpoints.setEndpoints(endpointIds))
-        {
-            conference.endpointTracksChanged(null);
-        }
+        octoEndpoints.setEndpoints(endpointIds);
+
+        // We only need to call this if the tracks of any endpoint actually
+        // changed, but that's not easy to detect. It's safe to call it more
+        // often.
+        conference.endpointTracksChanged(null);
 
         endpointIds.forEach(endpointId ->
         {
@@ -312,8 +322,9 @@ public class OctoTentacle extends PropertyChangeNotifier implements PotentialPac
      */
     public void expire()
     {
+        logger.info("Expiring");
         setRelays(new LinkedList<>());
-        octoEndpoints.setEndpoints(Collections.EMPTY_SET);
+        octoEndpoints.setEndpoints(Collections.emptySet());
     }
 
     /**
@@ -333,6 +344,7 @@ public class OctoTentacle extends PropertyChangeNotifier implements PotentialPac
      * Gets a JSON representation of the parts of this object's state that
      * are deemed useful for debugging.
      */
+    @SuppressWarnings("unchecked")
     public JSONObject getDebugState()
     {
         JSONObject debugState = new JSONObject();

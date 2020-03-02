@@ -18,6 +18,7 @@ package org.jitsi.videobridge.octo;
 import org.jitsi.nlj.rtp.*;
 import org.jitsi.nlj.util.*;
 import org.jitsi.utils.logging2.*;
+import org.jitsi.videobridge.rest.root.colibri.debug.*;
 import org.jitsi_modified.impl.neomedia.rtp.*;
 import org.jitsi.utils.*;
 import org.jitsi.videobridge.*;
@@ -87,6 +88,12 @@ public class OctoEndpoint
     }
 
     @Override
+    public void setFeature(EndpointDebugFeatures feature, boolean enabled)
+    {
+        // NO-OP
+    }
+
+    @Override
     public boolean shouldExpire()
     {
         return streamInformationStore.getReceiveSsrcs().isEmpty();
@@ -99,26 +106,8 @@ public class OctoEndpoint
     @Override
     public MediaStreamTrackDesc[] getMediaStreamTracks()
     {
-        List<MediaStreamTrackDesc> l = Arrays.stream(getConference().getTentacle().transceiver.getMediaStreamTracks())
-                .filter(t -> t.getOwner() == getID()).collect(Collectors.toList());
-        return l.toArray(new MediaStreamTrackDesc[0]);
-    }
-
-    @Override
-    public void onNewSsrcAssociation(
-            String epId,
-            long primarySsrc,
-            long secondarySsrc,
-            SsrcAssociationType type)
-    {
-        if (epId.equalsIgnoreCase(getID()))
-        {
-            streamInformationStore.addSsrcAssociation(new LocalSsrcAssociation(primarySsrc, secondarySsrc, type));
-        }
-        else
-        {
-            streamInformationStore.addSsrcAssociation(new RemoteSsrcAssociation(primarySsrc, secondarySsrc, type));
-        }
+        return Arrays.stream(getConference().getTentacle().transceiver.getMediaStreamTracks())
+                .filter(t -> t.getOwner().equals(getID())).toArray(MediaStreamTrackDesc[]::new);
     }
 
     /**

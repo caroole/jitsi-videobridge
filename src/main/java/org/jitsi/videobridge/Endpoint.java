@@ -15,6 +15,8 @@
  */
 package org.jitsi.videobridge;
 
+import kotlin.*;
+import kotlin.jvm.functions.*;
 import org.jetbrains.annotations.*;
 import org.jitsi.nlj.*;
 import org.jitsi.nlj.format.*;
@@ -23,22 +25,20 @@ import org.jitsi.nlj.rtp.bandwidthestimation.*;
 import org.jitsi.nlj.srtp.*;
 import org.jitsi.nlj.stats.*;
 import org.jitsi.nlj.transform.node.*;
-import org.jitsi.nlj.util.LocalSsrcAssociation;
-import org.jitsi.nlj.util.RemoteSsrcAssociation;
+import org.jitsi.nlj.util.*;
 import org.jitsi.rtp.*;
 import org.jitsi.rtp.rtcp.*;
 import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.*;
 import org.jitsi.rtp.rtp.*;
+import org.jitsi.utils.*;
 import org.jitsi.utils.concurrent.*;
 import org.jitsi.utils.logging.*;
-import org.jitsi.utils.*;
-import org.jitsi.utils.logging2.*;
 import org.jitsi.utils.logging2.Logger;
-import org.jitsi.utils.logging2.LoggerImpl;
 import org.jitsi.videobridge.cc.*;
 import org.jitsi.videobridge.datachannel.*;
 import org.jitsi.videobridge.datachannel.protocol.*;
 import org.jitsi.videobridge.rest.*;
+import org.jitsi.videobridge.rest.root.colibri.debug.*;
 import org.jitsi.videobridge.sctp.*;
 import org.jitsi.videobridge.shim.*;
 import org.jitsi.videobridge.util.*;
@@ -49,12 +49,16 @@ import org.jitsi_modified.impl.neomedia.rtp.*;
 import org.jitsi_modified.sctp4j.*;
 import org.json.simple.*;
 
+import java.beans.*;
 import java.io.*;
 import java.nio.*;
 import java.time.*;
 import java.util.*;
+import java.util.function.Function;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
+import java.util.function.*;
+import java.util.stream.*;
 
 import static org.jitsi.videobridge.EndpointMessageBuilder.*;
 
@@ -67,39 +71,26 @@ import static org.jitsi.videobridge.EndpointMessageBuilder.*;
  * @author George Politis
  */
 public class Endpoint
-    extends AbstractEndpoint implements PotentialPacketHandler
+    extends AbstractEndpoint implements PotentialPacketHandler,
+        PropertyChangeListener,
+        EncodingsManager.EncodingsUpdateListener
 {
-    /**
-     * The name of the <tt>Endpoint</tt> property <tt>pinnedEndpoint</tt> which
-     * specifies the JID of the currently pinned <tt>Endpoint</tt> of this
-     * <tt>Endpoint</tt>.
-     */
-    public static final String PINNED_ENDPOINTS_PROPERTY_NAME
-        = Endpoint.class.getName() + ".pinnedEndpoints";
-
-    /**
-     * The name of the <tt>Endpoint</tt> property <tt>selectedEndpoint</tt>
-     * which specifies the JID of the currently selected <tt>Endpoint</tt> of
-     * this <tt>Endpoint</tt>.
-     */
-    public static final String SELECTED_ENDPOINTS_PROPERTY_NAME
-        = Endpoint.class.getName() + ".selectedEndpoints";
-
-    /**
-     * The set of IDs of the pinned endpoints of this {@code Endpoint}.
-     */
-    private Set<String> pinnedEndpoints = new HashSet<>();
-
-    /**
-     * The set of currently selected <tt>Endpoint</tt>s at this
-     * <tt>Endpoint</tt>.
-     */
-    private Set<String> selectedEndpoints = new HashSet<>();
-
     /**
      * The {@link SctpManager} instance we'll use to manage the SCTP connection
      */
     private SctpManager sctpManager;
+
+    /**
+     * The time at which this endpoint was created (in millis since epoch)
+     */
+    private final Instant creationTime;
+
+    /**
+     * How long we'll give an endpoint to either successfully establish
+     * an ICE connection or fail before we expire it.
+     */
+    //TODO: make this configurable
+    private static final Duration EP_TIMEOUT = Duration.ofMinutes(2);
 
     /**
      * TODO Brian
@@ -126,7 +117,7 @@ public class Endpoint
     /**
      * A count of how many endpoints have 'selected' this endpoint
      */
-    private AtomicInteger selectedCount = new AtomicInteger(0);
+    private final AtomicInteger selectedCount = new AtomicInteger(0);
 
     /**
      * The diagnostic context of this instance.
@@ -155,23 +146,31 @@ public class Endpoint
     private final Transceiver transceiver;
 
     /**
-     * The list of {@link ChannelShim}s associated with this endpoint. This
+     * The set of {@link ChannelShim}s associated with this endpoint. This
      * allows us to expire the endpoint once all of its 'channels' have been
-     * removed.
+     * removed. The set of channels shims allows to determine if endpoint
+     * can accept audio or video.
      */
-    final List<ChannelShim> channelShims = new LinkedList<>();
+    private final Set<ChannelShim> channelShims = ConcurrentHashMap.newKeySet();
 
     /**
      * Whether this endpoint should accept audio packets. We set this according
-     * to whether the endpoint has an audio Colibri channel.
+     * to whether the endpoint has an audio Colibri channel whose direction
+     * allows sending.
      */
-    private boolean acceptAudio = false;
+    private volatile boolean acceptAudio = false;
 
     /**
      * Whether this endpoint should accept video packets. We set this according
-     * to whether the endpoint has a video Colibri channel.
+     * to whether the endpoint has a video Colibri channel whose direction
+     * allows sending.
      */
-    private boolean acceptVideo = false;
+    private volatile boolean acceptVideo = false;
+
+    /**
+     * The clock used by this endpoint
+     */
+    private final Clock clock;
 
     /**
      * Whether or not the bridge should be the peer which opens the data channel
@@ -200,35 +199,52 @@ public class Endpoint
      * otherwise - {@code false}
      */
     public Endpoint(
-            String id,
-            Conference conference,
-            Logger parentLogger,
-            boolean iceControlling)
+        String id,
+        Conference conference,
+        Logger parentLogger,
+        boolean iceControlling,
+        Clock clock)
         throws IOException
     {
         super(conference, id, parentLogger);
 
+        this.clock = clock;
+
+        creationTime = clock.instant();
+        super.addPropertyChangeListener(this);
         diagnosticContext = conference.newDiagnosticContext();
-        transceiver
-                = new Transceiver(
-                id,
-                TaskPools.CPU_POOL,
-                TaskPools.CPU_POOL,
-                TaskPools.SCHEDULED_POOL,
-                diagnosticContext,
-                logger);
+        transceiver = new Transceiver(
+            id,
+            TaskPools.CPU_POOL,
+            TaskPools.CPU_POOL,
+            TaskPools.SCHEDULED_POOL,
+            diagnosticContext,
+            logger,
+            clock
+        );
         transceiver.setIncomingPacketHandler(
-                new ConsumerNode("receiver chain handler")
+            new ConsumerNode("receiver chain handler")
+            {
+                @Override
+                protected void consume(@NotNull PacketInfo packetInfo)
                 {
-                    @Override
-                    protected void consume(@NotNull PacketInfo packetInfo)
-                    {
-                        handleIncomingPacket(packetInfo);
-                    }
-                });
+                    handleIncomingPacket(packetInfo);
+                }
+
+                @Override
+                public void trace(@NotNull Function0<Unit> f)
+                {
+                    f.invoke();
+                }
+            });
         bitrateController = new BitrateController(this, diagnosticContext, logger);
 
-        messageTransport = new EndpointMessageTransport(this, logger);
+        messageTransport = new EndpointMessageTransport(
+            this,
+            () -> getConference().getVideobridge().getStatistics(),
+            getConference(),
+            logger
+        );
 
         diagnosticContext.put("endpoint_id", id);
         bandwidthProbing
@@ -250,13 +266,23 @@ public class Endpoint
         bandwidthProbing.enabled = true;
         recurringRunnableExecutor.registerRecurringRunnable(bandwidthProbing);
 
-        dtlsTransport = new DtlsTransport(this, iceControlling, parentLogger);
+        dtlsTransport = new DtlsTransport(this, iceControlling, logger);
 
         if (conference.includeInStatistics())
         {
             conference.getVideobridge().getStatistics()
-                    .totalEndpoints.incrementAndGet();
+                .totalEndpoints.incrementAndGet();
         }
+
+    }
+    public Endpoint(
+        String id,
+        Conference conference,
+        Logger parentLogger,
+        boolean iceControlling)
+        throws IOException
+    {
+        this(id, conference, parentLogger, iceControlling, Clock.systemUTC());
     }
 
     /**
@@ -268,54 +294,18 @@ public class Endpoint
         return messageTransport;
     }
 
-    /**
-     * Sets the list of pinned endpoints for this endpoint.
-     * @param newPinnedEndpoints the set of pinned endpoints.
-     */
-    void pinnedEndpointsChanged(Set<String> newPinnedEndpoints)
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void propertyChange(PropertyChangeEvent evt)
     {
-        // Check if that's different to what we think the pinned endpoints are.
-        Set<String> oldPinnedEndpoints = this.pinnedEndpoints;
-        if (!oldPinnedEndpoints.equals(newPinnedEndpoints))
+        if (SELECTED_ENDPOINTS_PROPERTY_NAME.equals(evt.getPropertyName()))
         {
-            this.pinnedEndpoints = newPinnedEndpoints;
-
-            if (logger.isDebugEnabled())
-            {
-                logger.debug("Pinned "
-                    + Arrays.toString(pinnedEndpoints.toArray()));
-            }
-
-            bitrateController.setPinnedEndpointIds(pinnedEndpoints);
-
-            firePropertyChange(PINNED_ENDPOINTS_PROPERTY_NAME,
-                oldPinnedEndpoints, pinnedEndpoints);
+            bitrateController.setSelectedEndpointIds((Set<String>) evt.getNewValue());
         }
-    }
-
-    /**
-     * Sets the list of selected endpoints for this endpoint.
-     * @param newSelectedEndpoints the set of selected endpoints.
-     */
-    void selectedEndpointsChanged(Set<String> newSelectedEndpoints)
-    {
-        // Check if that's different to what we think the pinned endpoints are.
-        Set<String> oldSelectedEndpoints = this.selectedEndpoints;
-        if (!oldSelectedEndpoints.equals(newSelectedEndpoints))
+        else if (PINNED_ENDPOINTS_PROPERTY_NAME.equals(evt.getPropertyName()))
         {
-            this.selectedEndpoints = newSelectedEndpoints;
-
-            if (logger.isDebugEnabled())
-            {
-                logger.debug("Selected "
-                    + Arrays.toString(selectedEndpoints.toArray()));
-            }
-
-            bitrateController.setSelectedEndpointIds(
-                    Collections.unmodifiableSet(selectedEndpoints));
-
-            firePropertyChange(SELECTED_ENDPOINTS_PROPERTY_NAME,
-                oldSelectedEndpoints, selectedEndpoints);
+            bitrateController.setPinnedEndpointIds((Set<String>) evt.getNewValue());
         }
     }
 
@@ -333,14 +323,11 @@ public class Endpoint
      * this <tt>Endpoint</tt>.
      *
      * @param msg message text to send.
-     * @throws IOException
      */
     @Override
     public void sendMessage(String msg)
-        throws IOException
     {
-        EndpointMessageTransport messageTransport
-            = getMessageTransport();
+        EndpointMessageTransport messageTransport = getMessageTransport();
         if (messageTransport != null)
         {
             messageTransport.sendMessage(msg);
@@ -382,10 +369,6 @@ public class Endpoint
     public void setLocalSsrc(MediaType mediaType, long ssrc)
     {
         transceiver.setLocalSsrc(mediaType, ssrc);
-        if (MediaType.VIDEO.equals(mediaType))
-        {
-            bandwidthProbing.senderSsrc = ssrc;
-        }
     }
 
     /**
@@ -420,7 +403,7 @@ public class Endpoint
             if (packet instanceof VideoRtpPacket)
             {
                 return acceptVideo
-                        && bitrateController.accept((VideoRtpPacket) packet);
+                        && bitrateController.accept(packetInfo);
             }
             if (packet instanceof AudioRtpPacket)
             {
@@ -466,14 +449,8 @@ public class Endpoint
         Packet packet = packetInfo.getPacket();
         if (packet instanceof VideoRtpPacket)
         {
-            //TODO(brian): we lose all information in PacketInfo here,
-            // unfortunately, because the BitrateController can return more
-            // than/less than what was passed in (and in different order) so
-            // we can't just reassign a transformed packet back into its
-            // proper PacketInfo. Need to change those classes to work with
-            // the new packet types
-            VideoRtpPacket[] extras = bitrateController.transformRtp(packetInfo);
-            if (extras == null)
+            boolean accepted = bitrateController.transformRtp(packetInfo);
+            if (!accepted)
             {
                 logger.warn(
                     "Dropping a packet which was supposed to be accepted:"
@@ -482,13 +459,8 @@ public class Endpoint
             }
 
             // The original packet was transformed in place.
-            // TODO: should we send this *after* the extras?
             transceiver.sendPacket(packetInfo);
 
-            for (VideoRtpPacket videoRtpPacket : extras)
-            {
-                transceiver.sendPacket(new PacketInfo(videoRtpPacket));
-            }
             return;
         }
         else if (packet instanceof RtcpSrPacket)
@@ -564,11 +536,11 @@ public class Endpoint
      * {@inheritDoc}
      */
     @Override
-    public long getLastActivity()
+    public Instant getLastIncomingActivity()
     {
         PacketIOActivity packetIOActivity
                 = this.transceiver.getPacketIOActivity();
-        return packetIOActivity.getLastOverallActivityTimestampMs();
+        return packetIOActivity.getLastIncomingActivityInstant();
     }
 
     /**
@@ -588,30 +560,31 @@ public class Endpoint
             return true;
         }
 
-        PacketIOActivity packetIOActivity
-                = this.transceiver.getPacketIOActivity();
-
-        int maxExpireTimeSecsFromChannelShims = channelShims.stream()
+        Duration maxExpireTimeFromChannelShims = channelShims.stream()
                 .map(ChannelShim::getExpire)
-                .mapToInt(exp -> exp)
-                .max()
-                .orElse(0);
+                .map(Duration::ofSeconds)
+                .max(Comparator.comparing(Function.identity()))
+                .orElse(Duration.ofSeconds(0));
 
-        long lastActivity
-                = packetIOActivity.getLastOverallActivityTimestampMs();
-        if (lastActivity <= 0)
+        Instant lastActivity = getLastIncomingActivity();
+        Instant now = clock.instant();
+        if (lastActivity == ClockUtils.NEVER)
         {
+            Duration timeSinceCreation = Duration.between(creationTime, now);
+            if (timeSinceCreation.compareTo(EP_TIMEOUT) > 0) {
+                logger.info("Endpoint's ICE connection has neither failed nor connected " +
+                    "after " + timeSinceCreation + ", expiring");
+                return true;
+            }
             // We haven't seen any activity yet. If this continues ICE will
             // eventually fail (which is handled above).
             return false;
         }
 
-        long now = System.currentTimeMillis();
-        if (Duration.ofMillis(now - lastActivity).getSeconds()
-                > maxExpireTimeSecsFromChannelShims)
+        if (Duration.between(lastActivity, now).compareTo(maxExpireTimeFromChannelShims) > 0)
         {
             logger.info("Allowing to expire because of no activity in over " +
-                    maxExpireTimeSecsFromChannelShims + " seconds.");
+                    maxExpireTimeFromChannelShims);
             return true;
         }
         return false;
@@ -631,11 +604,23 @@ public class Endpoint
 
         try
         {
+            final ChannelShim[] channelShims = this.channelShims.toArray(new ChannelShim[0]);
+            this.channelShims.clear();
+
+            for (ChannelShim channelShim : channelShims)
+            {
+                if (!channelShim.isExpired())
+                {
+                    channelShim.setExpire(0);
+                }
+            }
+
             updateStatsOnExpire();
             this.transceiver.stop();
             if (logger.isDebugEnabled() && getConference().includeInStatistics())
             {
                 logger.debug(transceiver.getNodeStats().prettyPrint(0));
+                logger.debug(bitrateController.getDebugState().toJSONString());
             }
 
             transceiver.teardown();
@@ -657,6 +642,7 @@ public class Endpoint
         }
         bandwidthProbing.enabled = false;
         recurringRunnableExecutor.deRegisterRecurringRunnable(bandwidthProbing);
+        getConference().encodingsManager.unsubscribe(this);
 
         dtlsTransport.close();
 
@@ -798,6 +784,7 @@ public class Endpoint
             TaskPools.IO_POOL.submit(() -> {
                 // FIXME: This runs forever once the socket is closed (
                 // accept never returns true).
+                logger.info("Attempting to establish SCTP socket connection");
                 int attempts = 0;
                 while (!socket.accept())
                 {
@@ -822,6 +809,22 @@ public class Endpoint
                             " accepted connection.");
                 }
             });
+            TaskPools.SCHEDULED_POOL.schedule(() -> {
+                if (!isExpired()) {
+                    AbstractEndpointMessageTransport t = getMessageTransport();
+                    if (t != null)
+                    {
+                        if (!t.isConnected())
+                        {
+                            logger.error("EndpointMessageTransport still not connected.");
+                            getConference()
+                                .getVideobridge()
+                                .getStatistics()
+                                .numEndpointsNoMessageTransportAfterDelay.incrementAndGet();
+                        }
+                    }
+                }
+            }, 30, TimeUnit.SECONDS);
         });
     }
 
@@ -913,14 +916,7 @@ public class Endpoint
             {
                 logger.debug("Is now selected, sending message: " + selectedUpdate);
             }
-            try
-            {
-                sendMessage(selectedUpdate);
-            }
-            catch (IOException e)
-            {
-                logger.error("Error sending SelectedUpdate message: " + e);
-            }
+            sendMessage(selectedUpdate);
         }
     }
 
@@ -939,14 +935,7 @@ public class Endpoint
                 logger.debug("Is no longer selected, sending message: " +
                         selectedUpdate);
             }
-            try
-            {
-                sendMessage(selectedUpdate);
-            }
-            catch (IOException e)
-            {
-                logger.error("Error sending SelectedUpdate message: " + e);
-            }
+            sendMessage(selectedUpdate);
         }
     }
 
@@ -988,14 +977,7 @@ public class Endpoint
         String msg = createLastNEndpointsChangeEvent(
             forwardedEndpoints, endpointsEnteringLastN, conferenceEndpoints);
 
-        try
-        {
-            sendMessage(msg);
-        }
-        catch (IOException e)
-        {
-            logger.error("Failed to send message on data channel.", e);
-        }
+        sendMessage(msg);
     }
 
     /**
@@ -1013,7 +995,7 @@ public class Endpoint
      * A node which can be placed in the pipeline to cache SCTP packets until
      * the SCTPManager is ready to handle them.
      */
-    private class SctpHandler extends ConsumerNode
+    private static class SctpHandler extends ConsumerNode
     {
         private final Object sctpManagerLock = new Object();
         public SctpManager sctpManager = null;
@@ -1029,7 +1011,7 @@ public class Endpoint
         }
 
         @Override
-        protected void consume(PacketInfo packetInfo)
+        protected void consume(@NotNull PacketInfo packetInfo)
         {
             synchronized (sctpManagerLock)
             {
@@ -1065,13 +1047,19 @@ public class Endpoint
                 }
             });
         }
+
+        @Override
+        public void trace(@NotNull Function0<Unit> f)
+        {
+            f.invoke();
+        }
     }
 
     /**
      * A node which can be placed in the pipeline to cache Data channel packets
      * until the DataChannelStack is ready to handle them.
      */
-    private class DataChannelHandler extends ConsumerNode
+    private static class DataChannelHandler extends ConsumerNode
     {
         private final Object dataChannelStackLock = new Object();
         public DataChannelStack dataChannelStack = null;
@@ -1138,6 +1126,12 @@ public class Endpoint
                 }
             });
         }
+
+        @Override
+        public void trace(@NotNull Function0<Unit> f)
+        {
+            f.invoke();
+        }
     }
 
     /**
@@ -1191,33 +1185,31 @@ public class Endpoint
     @Override
     public void recreateMediaStreamTracks()
     {
-        ChannelShim videoChannel = getChannelOfMediaType(MediaType.VIDEO);
-        if (videoChannel != null)
-        {
+        final Supplier<Stream<ChannelShim>> videoChannels = () -> channelShims
+            .stream()
+            .filter(c -> MediaType.VIDEO.equals(c.getMediaType()));
+
+        final List<SourcePacketExtension> sources = videoChannels
+            .get()
+            .map(ChannelShim::getSources)
+            .filter(Objects::nonNull)
+            .flatMap(Collection::stream)
+            .collect(Collectors.toList());
+
+        final List<SourceGroupPacketExtension> sourceGroups = videoChannels
+            .get()
+            .map(ChannelShim::getSourceGroups)
+            .filter(Objects::nonNull)
+            .flatMap(Collection::stream)
+            .collect(Collectors.toList());
+
+        if (!sources.isEmpty() || !sourceGroups.isEmpty()) {
             MediaStreamTrackDesc[] tracks =
-                    MediaStreamTrackFactory.createMediaStreamTracks(
-                            videoChannel.getSources(),
-                            videoChannel.getSourceGroups());
+                MediaStreamTrackFactory.createMediaStreamTracks(
+                    sources,
+                    sourceGroups);
             setMediaStreamTracks(tracks);
         }
-    }
-
-    /**
-     * Gets this {@link AbstractEndpoint}'s channel of media type
-     * {@code mediaType} (although it's not strictly enforced, endpoints have
-     * at most one channel with a given media type).
-     *
-     * @param mediaType the media type of the channel.
-     *
-     * @return the channel.
-     */
-    private ChannelShim getChannelOfMediaType(MediaType mediaType)
-    {
-        return
-                channelShims.stream()
-                        .filter(c -> c.getMediaType().equals(mediaType))
-                        .findAny().orElse(null);
-
     }
 
     /**
@@ -1274,23 +1266,25 @@ public class Endpoint
     }
 
     /**
-     * Adds a channel to this enpoint.
+     * @return  the timestamp of the most recently created channel shim.
+     */
+    Instant getMostRecentChannelCreatedTime()
+    {
+        return channelShims.stream()
+            .map(ChannelShim::getCreationTimestamp)
+            .max(Comparator.comparing(Function.identity()))
+            .orElse(ClockUtils.NEVER);
+    }
+
+    /**
+     * Adds a channel to this endpoint.
      * @param channelShim
      */
     public void addChannel(ChannelShim channelShim)
     {
-        synchronized (channelShims)
+        if (channelShims.add(channelShim))
         {
-            switch (channelShim.getMediaType())
-            {
-                case AUDIO:
-                    acceptAudio = true;
-                    break;
-                case VIDEO:
-                    acceptVideo = true;
-                    break;
-            }
-            channelShims.add(channelShim);
+            updateAcceptedMediaTypes();
         }
     }
 
@@ -1300,24 +1294,89 @@ public class Endpoint
      */
     public void removeChannel(ChannelShim channelShim)
     {
-        synchronized (channelShims)
+        if (channelShims.remove(channelShim))
         {
-            switch (channelShim.getMediaType())
-            {
-                case AUDIO:
-                    acceptAudio = false;
-                    break;
-                case VIDEO:
-                    acceptVideo = false;
-                    break;
-            }
-
-            channelShims.remove(channelShim);
             if (channelShims.isEmpty())
             {
                 expire();
             }
+            else
+            {
+                updateAcceptedMediaTypes();
+            }
         }
+    }
+
+    /**
+     * Update media direction of {@link ChannelShim}s associated
+     * with this Endpoint.
+     *
+     * When media direction is set to 'sendrecv' JVB will
+     * accept incoming media from endpoint and forward it to
+     * other endpoints in a conference. Other endpoint's media
+     * will also be forwarded to current endpoint.
+     * When media direction is set to 'sendonly' JVB will
+     * NOT accept incoming media from this endpoint (not yet implemented), but
+     * media from other endpoints will be forwarded to this endpoint.
+     * When media direction is set to 'recvonly' JVB will
+     * accept incoming media from this endpoint, but will not forward
+     * other endpoint's media to this endpoint.
+     * When media direction is set to 'inactive' JVB will
+     * neither accept incoming media nor forward media from other endpoints.
+     *
+     * @param type media type.
+     * @param direction desired media direction:
+     *                       'sendrecv', 'sendonly', 'recvonly', 'inactive'
+     */
+    public void updateMediaDirection(MediaType type, String direction) {
+        switch (direction) {
+            case "sendrecv":
+            case "sendonly":
+            case "recvonly":
+            case "inactive": {
+                for (ChannelShim channelShim : channelShims) {
+                    if (channelShim.getMediaType() == type) {
+                        channelShim.setDirection(direction);
+                    }
+                }
+                break;
+            }
+            default:
+                throw new IllegalArgumentException("Media direction unknown: " + direction);
+        }
+    }
+
+    /**
+     * Update accepted media types based on
+     * {@link ChannelShim} permission to receive
+     * media
+     */
+    public void updateAcceptedMediaTypes()
+    {
+        boolean acceptAudio = false;
+        boolean acceptVideo = false;
+        for (ChannelShim channelShim : channelShims)
+        {
+            // The endpoint accepts audio packets (in the sense of accepting
+            // packets from other endpoints being forwarded to it) if it has
+            // an audio channel whose direction allows sending packets.
+            if (channelShim.allowsSendingMedia())
+            {
+                switch (channelShim.getMediaType())
+                {
+                    case AUDIO:
+                        acceptAudio = true;
+                        break;
+                    case VIDEO:
+                        acceptVideo = true;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+        this.acceptAudio = acceptAudio;
+        this.acceptVideo = acceptVideo;
     }
 
     /**
@@ -1332,12 +1391,11 @@ public class Endpoint
      * {@inheritDoc}
      */
     @Override
+    @SuppressWarnings("unchecked")
     public JSONObject getDebugState()
     {
         JSONObject debugState = super.getDebugState();
 
-        debugState.put("selectedEndpoints", selectedEndpoints.toString());
-        debugState.put("pinnedEndpoints", pinnedEndpoints.toString());
         debugState.put("selectedCount", selectedCount.get());
         //debugState.put("sctpManager", sctpManager.getDebugState());
         //debugState.put("messageTransport", messageTransport.getDebugState());
@@ -1347,7 +1405,22 @@ public class Endpoint
         debugState.put("transceiver", transceiver.getNodeStats().toJson());
         debugState.put("acceptAudio", acceptAudio);
         debugState.put("acceptVideo", acceptVideo);
+        debugState.put("messageTransport", messageTransport.getDebugState());
 
         return debugState;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void setFeature(EndpointDebugFeatures feature, boolean enabled) {
+
+        switch (feature)
+        {
+            case PCAP_DUMP:
+                transceiver.setFeature(Features.TRANSCEIVER_PCAP_DUMP, enabled);
+                break;
+        }
     }
 }

@@ -19,15 +19,16 @@ import org.jetbrains.annotations.*;
 import org.jitsi.nlj.*;
 import org.jitsi.nlj.format.*;
 import org.jitsi.nlj.rtp.*;
-import org.jitsi.nlj.util.*;
+import org.jitsi.nlj.rtp.codec.vp8.*;
 import org.jitsi.rtp.rtcp.*;
+import org.jitsi.utils.collections.*;
 import org.jitsi.utils.logging.*;
 import org.jitsi.utils.logging2.Logger;
 import org.jitsi.videobridge.cc.vp8.*;
-import org.jitsi_modified.impl.neomedia.codec.video.vp8.*;
 import org.jitsi_modified.impl.neomedia.rtp.*;
 import org.json.simple.*;
 
+import java.lang.*;
 import java.lang.ref.*;
 import java.util.*;
 
@@ -61,22 +62,6 @@ public class AdaptiveTrackProjection
      * parent?
      */
     private final Logger parentLogger;
-
-    /**
-     * An empty array that is used as a return value when no packets need to be
-     * piggy-backed.
-     */
-    public static final VideoRtpPacket[] EMPTY_PACKET_ARR = new VideoRtpPacket[0];
-
-    /**
-     * A {@link WeakReference} to the {@link MediaStreamTrackDesc} that owns
-     * the packets that this instance filters.
-     *
-     * Note that we keep a {@link WeakReference} instead of a reference to allow
-     * the channel/stream/etc objects to be de-allocated in case the sending
-     * participant leaves the conference.
-     */
-    private final WeakReference<MediaStreamTrackDesc> weakSource;
 
     /**
      * The main SSRC of the source track (if simulcast is used, this is the SSRC
@@ -119,38 +104,33 @@ public class AdaptiveTrackProjection
      */
     private int targetIndex = RTPEncodingDesc.SUSPENDED_INDEX;
 
-    //TODO(brian): we need this to know which frameprojectioncontext to make
-    // based on the payload type of a packet.  is there a better way?
-    private final Map<Byte, PayloadType> payloadTypes = new HashMap<>();
+    private final Map<Byte, PayloadType> payloadTypes;
 
     /**
      * Ctor.
      *
      * @param source the {@link MediaStreamTrackDesc} that owns the packets
      * that this instance filters.
+     *
+     * @param payloadTypes a reference to a map of payload types.  This map
+     *                     should be updated as the payload types change.
      */
     AdaptiveTrackProjection(
         @NotNull DiagnosticContext diagnosticContext,
         @NotNull MediaStreamTrackDesc source,
         Runnable keyframeRequester,
+        Map<Byte, PayloadType> payloadTypes,
         Logger parentLogger
     )
     {
-        weakSource = new WeakReference<>(source);
         targetSsrc = source.getRTPEncodings()[0].getPrimarySSRC();
         this.diagnosticContext = diagnosticContext;
+        this.payloadTypes = payloadTypes;
         this.parentLogger = parentLogger;
-        this.logger = parentLogger.createChildLogger(AdaptiveTrackProjection.class.getName());
+        this.logger = parentLogger.createChildLogger(AdaptiveTrackProjection.class.getName(),
+            JMap.of("targetSsrc", Long.toString(targetSsrc),
+                "srcEpId", Objects.toString(source.getOwner(), "")));
         this.keyframeRequester = keyframeRequester;
-    }
-
-    /**
-     * @return the {@link MediaStreamTrackDesc} that owns the packets that this
-     * instance filters. Note that this may return null.
-     */
-    public MediaStreamTrackDesc getSource()
-    {
-        return weakSource.get();
     }
 
     /**
@@ -196,24 +176,21 @@ public class AdaptiveTrackProjection
      */
     private final Runnable keyframeRequester;
 
-    private final PacketCache packetCache
-            = new PacketCache(packet -> packet instanceof VideoRtpPacket);
-
     /**
      * Determines whether an RTP packet needs to be accepted or not.
      *
-     * @param videoRtpPacket the video RTP packet to determine whether to accept
-     * or not.
+     * @param packetInfo packet info for the video RTP packet to determine
+     * whether to accept or not.
      * @return true if the packet is accepted, false otherwise.
      */
-    public boolean accept(@NotNull VideoRtpPacket videoRtpPacket)
+    public boolean accept(@NotNull PacketInfo packetInfo)
     {
+        VideoRtpPacket videoRtpPacket = packetInfo.packetAs();
         AdaptiveTrackProjectionContext contextCopy = getContext(videoRtpPacket);
         if (contextCopy == null)
         {
             return false;
         }
-        packetCache.insert(videoRtpPacket);
 
         // XXX We want to let the context know that the stream has been
         // suspended so that it can raise the needsKeyframe flag and also allow
@@ -221,17 +198,15 @@ public class AdaptiveTrackProjection
 
         if (videoRtpPacket.getQualityIndex() < 0)
         {
-            MediaStreamTrackDesc sourceTrack = getSource();
             logger.warn(
                 "Dropping an RTP packet, because egress was unable to find " +
-                "an associated encoding. sourceTrack=" + sourceTrack +
-                ", rtpPacket=" + videoRtpPacket);
+                "an associated encoding. rtpPacket=" + videoRtpPacket);
             return false;
         }
 
         int targetIndexCopy = targetIndex;
         boolean accept = contextCopy.accept(
-            videoRtpPacket, videoRtpPacket.getQualityIndex(), targetIndexCopy);
+            packetInfo, videoRtpPacket.getQualityIndex(), targetIndexCopy);
 
         // We check if the context needs a keyframe regardless of whether or not
         // the packet was accepted.
@@ -243,11 +218,7 @@ public class AdaptiveTrackProjection
         if (contextCopy.needsKeyframe()
             && targetIndexCopy > RTPEncodingDesc.SUSPENDED_INDEX)
         {
-            MediaStreamTrackDesc source = getSource();
-            if (source != null)
-            {
-                keyframeRequester.run();
-            }
+            keyframeRequester.run();
         }
 
         return accept;
@@ -260,20 +231,19 @@ public class AdaptiveTrackProjection
      * new adaptive track projection context is created that is appropriate for
      * the new payload type.
      *
-     * Note that, at the time of this writing, there's no practical need for a
-     * synchronized keyword because there's only one thread (the translator
-     * thread) accessing this method at a time.
+     * We make no attempt for thread safety, assuming no concurrent access.
      *
      * @param rtpPacket the RTP packet of the adaptive track projection context
      * to get or create.
      * @return the adaptive track projection context that corresponds to
      * the payload type of the RTP packet that is specified as a parameter.
      */
-    private synchronized
+    private
     AdaptiveTrackProjectionContext getContext(@NotNull VideoRtpPacket rtpPacket)
     {
         PayloadType payloadTypeObject;
         int payloadType = rtpPacket.getPayloadType();
+
         if (context == null || contextPayloadType != payloadType)
         {
             logger.debug(() -> " adaptive track projection " +
@@ -301,26 +271,32 @@ public class AdaptiveTrackProjection
             // scalability, conversely if temporal scalability is disabled
             // then simulcast is disabled.
 
-            byte[] buf = rtpPacket.getBuffer();
-            int payloadOffset = rtpPacket.getPayloadOffset(),
-                payloadLen = rtpPacket.getPayloadLength();
+            /* Check whether this stream is projectable by the VP8AdaptiveTrackProjectionContext. */
+            boolean projectable = rtpPacket instanceof Vp8Packet &&
+                ((Vp8Packet)rtpPacket).getHasTemporalLayerIndex() &&
+                ((Vp8Packet)rtpPacket).getHasPictureId();
 
-            boolean hasTemporalLayerIndex = DePacketizer.VP8PayloadDescriptor
-                .getTemporalLayerIndex(buf, payloadOffset, payloadLen) > -1;
-
-            if (hasTemporalLayerIndex
+            if (projectable
                 && !(context instanceof VP8AdaptiveTrackProjectionContext))
             {
                 // context switch
+                RtpState rtpState = getRtpState();
+                if (rtpState == null) {
+                    return null;
+                }
                 context = new VP8AdaptiveTrackProjectionContext(
-                    diagnosticContext, payloadTypeObject, getRtpState(), parentLogger);
+                    diagnosticContext, payloadTypeObject, rtpState, parentLogger);
                 contextPayloadType = payloadType;
             }
-            else if (!hasTemporalLayerIndex
+            else if (!projectable
                 && !(context instanceof GenericAdaptiveTrackProjectionContext))
             {
+                RtpState rtpState = getRtpState();
+                if (rtpState == null) {
+                    return null;
+                }
                 // context switch
-                context = new GenericAdaptiveTrackProjectionContext(payloadTypeObject, getRtpState(), parentLogger);
+                context = new GenericAdaptiveTrackProjectionContext(payloadTypeObject, rtpState, parentLogger);
                 contextPayloadType = payloadType;
             }
 
@@ -329,7 +305,11 @@ public class AdaptiveTrackProjection
         }
         else if (context == null || contextPayloadType != payloadType)
         {
-            context = new GenericAdaptiveTrackProjectionContext(payloadTypeObject, getRtpState(), parentLogger);
+            RtpState rtpState = getRtpState();
+            if (rtpState == null) {
+                return null;
+            }
+            context = new GenericAdaptiveTrackProjectionContext(payloadTypeObject, rtpState, parentLogger);
             contextPayloadType = payloadType;
             return context;
         }
@@ -346,12 +326,10 @@ public class AdaptiveTrackProjection
     {
         if (context == null)
         {
-            MediaStreamTrackDesc track = getSource();
-            long ssrc = track.getRTPEncodings()[0].getPrimarySSRC();
             // TODO If '1' are the starting seq number and timestamp, should
-            // we use random values?
+            //  we use random values?
             return new RtpState(
-                ssrc,
+                targetSsrc,
                 1 /* maxSequenceNumber */,
                 1 /* maxTimestamp */) ;
         }
@@ -362,23 +340,18 @@ public class AdaptiveTrackProjection
     }
 
     /**
-     * Rewrites an RTP packet and it returns any additional RTP packets that
-     * need to be piggy-backed.
+     * Rewrites an RTP packet for projection.
      *
-     * @param rtpPacket the RTP packet to rewrite.
-     * @return any piggy-backed packets to include with the packet.
-     * XXX unused?
+     * @param packetInfo the RTP packet to rewrite.
      */
-    VideoRtpPacket[] rewriteRtp(@NotNull VideoRtpPacket rtpPacket)
+   void rewriteRtp(@NotNull PacketInfo packetInfo)
         throws RewriteException
     {
         AdaptiveTrackProjectionContext contextCopy = context;
-        if (contextCopy == null)
+        if (contextCopy != null)
         {
-            return EMPTY_PACKET_ARR;
+            contextCopy.rewriteRtp(packetInfo);
         }
-
-        return contextCopy.rewriteRtp(rtpPacket, packetCache);
     }
 
     /**
@@ -387,7 +360,7 @@ public class AdaptiveTrackProjection
      * @param rtcpSrPacket the RTCP SR packet to rewrite.
      * @return true to let the RTCP packet through, false to drop.
      */
-    public boolean rewriteRtcp(@NotNull RtcpSrPacket rtcpSrPacket)
+    boolean rewriteRtcp(@NotNull RtcpSrPacket rtcpSrPacket)
     {
         AdaptiveTrackProjectionContext contextCopy = context;
         if (contextCopy == null)
@@ -401,52 +374,28 @@ public class AdaptiveTrackProjection
     /**
      * @return the SSRC of the track projection.
      */
-    public long getTargetSsrc()
+    long getTargetSsrc()
     {
         return targetSsrc;
-    }
-
-    /**
-     * Adds a payload type.
-     */
-    public void addPayloadType(PayloadType payloadType)
-    {
-        payloadTypes.put(payloadType.getPt(), payloadType);
     }
 
     /**
      * Gets a JSON representation of the parts of this object's state that
      * are deemed useful for debugging.
      */
+    @SuppressWarnings("unchecked")
     public JSONObject getDebugState()
     {
         JSONObject debugState = new JSONObject();
-        MediaStreamTrackDesc source = weakSource.get();
-        if (source == null)
-        {
-            debugState.put("source", null);
-        }
-        else
-        {
-            JSONObject sourceJson = new JSONObject();
-            sourceJson.put("owner", source.getOwner());
-            for (RTPEncodingDesc encodingDesc : source.getRTPEncodings())
-            {
-                sourceJson.put(
-                        encodingDesc.getPrimarySSRC(),
-                        MediaStreamTracksKt.getNodeStats(encodingDesc).toJson());
-            }
-            debugState.put("source", sourceJson);
-        }
 
         debugState.put("targetSsrc", targetSsrc);
+        AdaptiveTrackProjectionContext contextCopy = context;
         debugState.put(
                 "context",
-                context == null ? null : context.getDebugState());
+                contextCopy == null ? null : contextCopy.getDebugState());
         debugState.put("contextPayloadType", contextPayloadType);
         debugState.put("idealIndex", idealIndex);
         debugState.put("targetIndex", targetIndex);
-        debugState.put("packetCache", packetCache.getNodeStats().toJson());
 
         return debugState;
     }

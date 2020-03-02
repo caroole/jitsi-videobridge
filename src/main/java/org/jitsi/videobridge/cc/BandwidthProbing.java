@@ -15,37 +15,22 @@
  */
 package org.jitsi.videobridge.cc;
 
- import org.jitsi.nlj.util.*;
- import org.jitsi.service.configuration.*;
- import org.jitsi.service.libjitsi.*;
- import org.jitsi.utils.concurrent.*;
- import org.jitsi.utils.logging.*;
- import org.jitsi.nlj.rtp.bandwidthestimation.*;
- import org.json.simple.*;
+import org.jitsi.nlj.rtp.bandwidthestimation.*;
+import org.jitsi.nlj.util.*;
+import org.jitsi.utils.concurrent.*;
+import org.jitsi.utils.logging.*;
+import org.json.simple.*;
 
- import java.util.*;
+import java.util.*;
 
- /**
+import static org.jitsi.videobridge.cc.config.BandwidthProbingConfig.*;
+
+/**
   * @author George Politis
   */
  public class BandwidthProbing
      extends PeriodicRunnable implements BandwidthEstimator.Listener
  {
-     /**
-      * The system property name that holds a boolean that determines whether or
-      * not to activate the RTX bandwidth probing mechanism that implements
-      * stream protection.
-      */
-     public static final String
-         DISABLE_RTX_PROBING_PNAME = "org.jitsi.videobridge.DISABLE_RTX_PROBING";
-
-     /**
-      * The system property name that holds the interval/period in milliseconds
-      * at which {@link #run()} is to be invoked.
-      */
-     public static final String
-         PADDING_PERIOD_MS_PNAME = "org.jitsi.videobridge.PADDING_PERIOD_MS";
-
      /**
       * The {@link TimeSeriesLogger} to be used by this instance to print time
       * series.
@@ -53,44 +38,24 @@ package org.jitsi.videobridge.cc;
      private static final TimeSeriesLogger timeSeriesLogger
          = TimeSeriesLogger.getTimeSeriesLogger(BandwidthProbing.class);
 
-     /**
-      * The ConfigurationService to get config values from.
-      */
-     private static final ConfigurationService
-         cfg = LibJitsi.getConfigurationService();
-
-     /**
-      * the interval/period in milliseconds at which {@link #run()} is to be
-      * invoked.
-      */
-     private static final long PADDING_PERIOD_MS =
-         cfg != null ? cfg.getInt(PADDING_PERIOD_MS_PNAME, 15) : 15;
-
-     /**
-      * A boolean that determines whether or not to activate the RTX bandwidth
-      * probing mechanism that implements stream protection.
-      */
-     private static final boolean DISABLE_RTX_PROBING =
-         cfg != null && cfg.getBoolean(DISABLE_RTX_PROBING_PNAME, false);
+     private static Random random = new Random();
 
      /**
       * The sequence number to use if probing with the JVB's SSRC.
       */
-     private int seqNum = new Random().nextInt(0xFFFF);
+     private int seqNum = random.nextInt(0xFFFF);
 
      /**
       * The RTP timestamp to use if probing with the JVB's SSRC.
       */
-     private long ts = new Random().nextInt() & 0xFFFFFFFFL;
+     private long ts = random.nextInt() & 0xFFFFFFFFL;
 
      /**
       * Whether or not probing is currently enabled
       */
      public boolean enabled = false;
 
-     public Long senderSsrc = null;
-
-     public Long latestBwe = -1L;
+     private Long latestBwe = -1L;
 
      private DiagnosticContext diagnosticContext;
 
@@ -104,7 +69,7 @@ package org.jitsi.videobridge.cc;
       */
      public BandwidthProbing(ProbingDataSender probingDataSender)
      {
-         super(PADDING_PERIOD_MS);
+         super(Config.paddingPeriodMs());
          this.probingDataSender = probingDataSender;
      }
 
@@ -191,7 +156,7 @@ package org.jitsi.videobridge.cc;
 
          // XXX a signed int is practically sufficient, as it can represent up to
          // ~ 2GB
-         int bytes = (int) (PADDING_PERIOD_MS * paddingBps / 1000 / 8);
+         int bytes = (int) (Config.paddingPeriodMs() * paddingBps / 1000 / 8);
 
          if (!bitrateControllerStatus.activeSsrcs.isEmpty())
          {
@@ -216,28 +181,16 @@ package org.jitsi.videobridge.cc;
      }
 
      /**
-      * (attempts) to get the local SSRC that will be used in the media sender
-      * SSRC field of the RTCP reports. TAG(cat4-local-ssrc-hurricane)
-      *
-      * @return get the local SSRC that will be used in the media sender SSRC
-      * field of the RTCP reports.
-      */
-     private long getSenderSSRC()
-     {
-         return senderSsrc == null ? -1 : senderSsrc;
-     }
-
-     /**
       * Gets a JSON representation of the parts of this object's state that
       * are deemed useful for debugging.
       */
+     @SuppressWarnings("unchecked")
      public JSONObject getDebugState()
      {
          JSONObject debugState = new JSONObject();
          debugState.put("seqNum", seqNum);
          debugState.put("ts", ts);
          debugState.put("enabled", enabled);
-         debugState.put("senderSsrc", senderSsrc);
          debugState.put("latestBwe", latestBwe);
 
          return debugState;

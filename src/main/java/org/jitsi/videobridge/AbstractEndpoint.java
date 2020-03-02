@@ -15,14 +15,17 @@
  */
 package org.jitsi.videobridge;
 
+import org.jitsi.nlj.util.*;
 import org.jitsi.utils.*;
 import org.jitsi.utils.event.*;
 import org.jitsi.utils.logging2.*;
+import org.jitsi.videobridge.rest.root.colibri.debug.*;
 import org.jitsi.xmpp.extensions.colibri.*;
 import org.jitsi_modified.impl.neomedia.rtp.*;
 import org.json.simple.*;
 
 import java.io.*;
+import java.time.*;
 import java.util.*;
 
 /**
@@ -36,8 +39,23 @@ import java.util.*;
  * @author Brian Baldino
  */
 public abstract class AbstractEndpoint extends PropertyChangeNotifier
-    implements EncodingsManager.EncodingsUpdateListener
 {
+    /**
+     * The name of the <tt>Endpoint</tt> property <tt>pinnedEndpoint</tt> which
+     * specifies the ID of the currently pinned <tt>Endpoint</tt> of this
+     * <tt>Endpoint</tt>.
+     */
+    public static final String PINNED_ENDPOINTS_PROPERTY_NAME
+        = Endpoint.class.getName() + ".pinnedEndpoints";
+
+    /**
+     * The name of the <tt>Endpoint</tt> property <tt>selectedEndpoint</tt>
+     * which specifies the ID of the currently selected <tt>Endpoint</tt> of
+     * this <tt>Endpoint</tt>.
+     */
+    public static final String SELECTED_ENDPOINTS_PROPERTY_NAME
+        = Endpoint.class.getName() + ".selectedEndpoints";
+
     /**
      * The (unique) identifier/ID of the endpoint of a participant in a
      * <tt>Conference</tt>.
@@ -70,6 +88,65 @@ public abstract class AbstractEndpoint extends PropertyChangeNotifier
      * on this <tt>Endpoint</tt>.
      */
     private boolean expired = false;
+
+    /**
+     * The set of IDs of the pinned endpoints of this {@code Endpoint}.
+     */
+    private Set<String> pinnedEndpoints = new HashSet<>();
+
+    /**
+     * The set of currently selected <tt>Endpoint</tt>s at this
+     * <tt>Endpoint</tt>.
+     */
+    private Set<String> selectedEndpoints = new HashSet<>();
+
+
+    /**
+     * Sets the list of pinned endpoints for this endpoint.
+     * @param newPinnedEndpoints the set of pinned endpoints.
+     * @return true if the underlying set of pinned endpoints has changed, false
+     * otherwise. The return value was introduced to enable overrides to
+     * act upon the underlying set changing.
+     */
+    public void pinnedEndpointsChanged(Set<String> newPinnedEndpoints)
+    {
+        // Check if that's different to what we think the pinned endpoints are.
+        Set<String> oldPinnedEndpoints = this.pinnedEndpoints;
+        if (!oldPinnedEndpoints.equals(newPinnedEndpoints))
+        {
+            this.pinnedEndpoints = newPinnedEndpoints;
+
+            logger.debug(() -> "Pinned "
+                + Arrays.toString(pinnedEndpoints.toArray()));
+
+            firePropertyChange(PINNED_ENDPOINTS_PROPERTY_NAME,
+                oldPinnedEndpoints, pinnedEndpoints);
+        }
+    }
+
+    /**
+     * Sets the list of selected endpoints for this endpoint.
+     * @param newSelectedEndpoints the set of selected endpoints.
+     * @return true if the underlying set of selected endpoints has changed,
+     * false otherwise. The return value was introduced to enable overrides to
+     * act upon the underlying set changing.
+     */
+    public void selectedEndpointsChanged(Set<String> newSelectedEndpoints)
+    {
+        // Check if that's different to what we think the pinned endpoints are.
+        Set<String> oldSelectedEndpoints = this.selectedEndpoints;
+        if (!oldSelectedEndpoints.equals(newSelectedEndpoints))
+        {
+            this.selectedEndpoints = newSelectedEndpoints;
+
+            logger.debug(() -> "Selected "
+                + Arrays.toString(selectedEndpoints.toArray()));
+
+            firePropertyChange(SELECTED_ENDPOINTS_PROPERTY_NAME,
+                oldSelectedEndpoints, selectedEndpoints);
+        }
+    }
+
 
     /**
      * Initializes a new {@link AbstractEndpoint} instance.
@@ -201,6 +278,10 @@ public abstract class AbstractEndpoint extends PropertyChangeNotifier
     public void setStatsId(String value)
     {
         this.statsId = value;
+        if (value != null)
+        {
+            logger.addContext("stats_id", value);
+        }
     }
 
     /**
@@ -241,12 +322,12 @@ public abstract class AbstractEndpoint extends PropertyChangeNotifier
     public abstract boolean shouldExpire();
 
     /**
-     * Get the last 'activity' (packets received or packets sent) this endpoint has seen
+     * Get the last 'incoming activity' (packets received) this endpoint has seen
      * @return the timestamp, in milliseconds, of the last activity of this endpoint
      */
-    public long getLastActivity()
+    public Instant getLastIncomingActivity()
     {
-        return 0;
+        return ClockUtils.NEVER;
     }
 
     /**
@@ -316,13 +397,24 @@ public abstract class AbstractEndpoint extends PropertyChangeNotifier
      * Gets a JSON representation of the parts of this object's state that
      * are deemed useful for debugging.
      */
+    @SuppressWarnings("unchecked")
     public JSONObject getDebugState()
     {
         JSONObject debugState = new JSONObject();
         debugState.put("displayName", displayName);
         debugState.put("expired", expired);
         debugState.put("statsId", statsId);
+        debugState.put("selectedEndpoints", selectedEndpoints.toString());
+        debugState.put("pinnedEndpoints", pinnedEndpoints.toString());
 
         return debugState;
     }
+
+    /**
+     * Enables/disables the given feature, if the endpoint implementation supports it.
+     *
+     * @param feature the feature to enable or disable.
+     * @param enabled the state of the feature.
+     */
+    public abstract void setFeature(EndpointDebugFeatures feature, boolean enabled);
 }

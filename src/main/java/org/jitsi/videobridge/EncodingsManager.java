@@ -99,6 +99,14 @@ public class EncodingsManager
     }
 
     /**
+     * Unsubscribe from SSRC updates.
+     */
+    public void unsubscribe(EncodingsUpdateListener listener)
+    {
+        listeners.remove(listener);
+    }
+
+    /**
      * An interface for listening to new associations.
      */
     interface EncodingsUpdateListener
@@ -116,7 +124,7 @@ public class EncodingsManager
     /**
      * Represents an SSRC association.
      */
-    private class SsrcAssociation
+    private static class SsrcAssociation
     {
         /**
          * The primary SSRC.

@@ -26,7 +26,10 @@ public enum DebugFeatures
     NODE_STATS("node-stats"),
     POOL_STATS("pool-stats"),
     QUEUE_STATS("queue-stats"),
-    TRANSIT_STATS("transit-stats");
+    TRANSIT_STATS("transit-stats"),
+    TASK_POOL_STATS("task-pool-stats"),
+    NODE_TRACING("node-tracing"),
+    XMPP_DELAY_STATS("xmpp-delay-stats");
 
     private final String value;
 

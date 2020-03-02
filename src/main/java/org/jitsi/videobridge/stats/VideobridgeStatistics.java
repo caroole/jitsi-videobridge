@@ -15,21 +15,21 @@
  */
 package org.jitsi.videobridge.stats;
 
+import org.jitsi.nlj.stats.*;
+import org.jitsi.nlj.transform.node.incoming.*;
+import org.jitsi.osgi.*;
+import org.jitsi.utils.*;
+import org.jitsi.videobridge.*;
+import org.jitsi.videobridge.octo.*;
+import org.jitsi.videobridge.octo.config.*;
+import org.jitsi.videobridge.shim.*;
+import org.json.simple.*;
+import org.osgi.framework.*;
+
 import java.lang.management.*;
 import java.text.*;
 import java.util.*;
 import java.util.concurrent.locks.*;
-
-import org.jitsi.nlj.stats.*;
-import org.jitsi.nlj.transform.node.incoming.*;
-import org.jitsi.osgi.*;
-import org.jitsi.service.configuration.*;
-import org.jitsi.utils.*;
-import org.jitsi.videobridge.*;
-import org.jitsi.videobridge.octo.*;
-import org.jitsi.videobridge.shim.*;
-import org.json.simple.*;
-import org.osgi.framework.*;
 
 import static org.jitsi.xmpp.extensions.colibri.ColibriStatsExtension.*;
 
@@ -46,7 +46,7 @@ public class VideobridgeStatistics
      * The <tt>DateFormat</tt> to be utilized by <tt>VideobridgeStatistics</tt>
      * in order to represent time and date as <tt>String</tt>.
      */
-    private static final DateFormat dateFormat;
+    private final DateFormat timestampFormat;
 
     /**
      * The number of buckets to use for conference sizes.
@@ -56,27 +56,11 @@ public class VideobridgeStatistics
     /**
      * The currently configured region.
      */
-    public static String region = null;
+    private static final String region = OctoConfig.Config.region();
 
-    /**
-     * The name of the property used to configure the region.
-     */
-    public static final String REGION_PNAME = "org.jitsi.videobridge.REGION";
 
-    static
-    {
-        dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
-        dateFormat.setTimeZone(TimeZone.getTimeZone("UTC"));
-    }
-
-    /**
-     * Returns the current time stamp as a (formatted) <tt>String</tt>.
-     * @return the current time stamp as a (formatted) <tt>String</tt>.
-     */
-    public static String currentTimeMillis()
-    {
-        return dateFormat.format(new Date());
-    }
+    public static final String EPS_NO_MSG_TRANSPORT_AFTER_DELAY =
+        "num_eps_no_msg_transport_after_delay";
 
     /**
      * The indicator which determines whether {@link #generate()} is executing
@@ -92,26 +76,16 @@ public class VideobridgeStatistics
      */
     public VideobridgeStatistics()
     {
-        BundleContext bundleContext
-            = StatsManagerBundleActivator.getBundleContext();
-
-        ConfigurationService cfg
-            = ServiceUtils2.getService(bundleContext, ConfigurationService.class);
-        if (cfg != null)
-        {
-            region = cfg.getString(REGION_PNAME, region);
-        }
+        timestampFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+        timestampFormat.setTimeZone(TimeZone.getTimeZone("UTC"));
 
         // Is it necessary to set initial values for all of these?
         unlockedSetStat(BITRATE_DOWNLOAD, 0);
         unlockedSetStat(BITRATE_UPLOAD, 0);
         unlockedSetStat(CONFERENCES, 0);
-        unlockedSetStat(CPU_USAGE, 0d);
         unlockedSetStat(PARTICIPANTS, 0);
         unlockedSetStat(THREADS, 0);
         unlockedSetStat(RTP_LOSS, 0d);
-        unlockedSetStat(TOTAL_MEMORY, 0);
-        unlockedSetStat(USED_MEMORY, 0);
         unlockedSetStat(VIDEO_CHANNELS, 0);
         unlockedSetStat(VIDEO_STREAMS, 0);
         unlockedSetStat(LOSS_RATE_DOWNLOAD, 0d);
@@ -121,7 +95,7 @@ public class VideobridgeStatistics
         unlockedSetStat(LARGEST_CONFERENCE, 0);
         unlockedSetStat(CONFERENCE_SIZES, "[]");
 
-        unlockedSetStat(TIMESTAMP, currentTimeMillis());
+        unlockedSetStat(TIMESTAMP, timestampFormat.format(new Date()));
     }
 
     /**
@@ -179,7 +153,8 @@ public class VideobridgeStatistics
      * Generates/updates the statistics represented by this instance outside a
      * synchronized block.
      */
-    protected void generate0()
+    @SuppressWarnings("unchecked")
+    private void generate0()
     {
         BundleContext bundleContext
                 = StatsManagerBundleActivator.getBundleContext();
@@ -297,7 +272,7 @@ public class VideobridgeStatistics
                 // Assume we're sending one video stream to this endpoint
                 // for each other endpoint in the conference unless there's
                 // a limit imposed by lastN.
-                Integer lastN = endpoint.getLastN();
+                int lastN = endpoint.getLastN();
                 endpointStreams
                    += lastN == -1
                        ? numConferenceEndpoints - 1
@@ -336,15 +311,6 @@ public class VideobridgeStatistics
 
         // THREADS
         int threadCount = ManagementFactory.getThreadMXBean().getThreadCount();
-
-        // OsStatistics
-        OsStatistics osStatistics = OsStatistics.getOsStatistics();
-        double cpuUsage = osStatistics.getCPUUsage();
-        int totalMemory = osStatistics.getTotalMemory();
-        int usedMemory = osStatistics.getUsedMemory();
-
-        // TIMESTAMP
-        String timestamp = currentTimeMillis();
 
         // Now that (the new values of) the statistics have been calculated and
         // the risks of the current thread hanging have been reduced as much as
@@ -408,6 +374,10 @@ public class VideobridgeStatistics
                     TOTAL_LOSS_DEGRADED_PARTICIPANT_SECONDS,
                    jvbStats.totalLossDegradedParticipantMs.get() / 1000);
             unlockedSetStat(TOTAL_PARTICIPANTS, jvbStats.totalEndpoints.get());
+            unlockedSetStat(
+                EPS_NO_MSG_TRANSPORT_AFTER_DELAY,
+                jvbStats.numEndpointsNoMessageTransportAfterDelay.get()
+            );
             unlockedSetStat(CONFERENCES, conferences);
             unlockedSetStat(PARTICIPANTS, endpoints);
             unlockedSetStat(VIDEO_CHANNELS, videoChannels);
@@ -415,9 +385,6 @@ public class VideobridgeStatistics
             unlockedSetStat(LARGEST_CONFERENCE, largestConferenceSize);
             unlockedSetStat(CONFERENCE_SIZES, conferenceSizesJson);
             unlockedSetStat(THREADS, threadCount);
-            unlockedSetStat(CPU_USAGE, Math.max(cpuUsage, 0));
-            unlockedSetStat(TOTAL_MEMORY, Math.max(totalMemory, 0));
-            unlockedSetStat(USED_MEMORY, Math.max(usedMemory, 0));
             unlockedSetStat(
                     SHUTDOWN_IN_PROGRESS,
                     videobridge.isShutdownInProgress());
@@ -460,7 +427,7 @@ public class VideobridgeStatistics
                     octoRelay == null
                             ? 0 : (octoRelay.getSendBitrate() + 500) / 1000);
 
-            unlockedSetStat(TIMESTAMP, timestamp);
+            unlockedSetStat(TIMESTAMP, timestampFormat.format(new Date()));
             if (octoRelay != null)
             {
                 unlockedSetStat(RELAY_ID, octoRelay.getId());
